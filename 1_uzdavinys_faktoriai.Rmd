@@ -1,0 +1,596 @@
+---
+title: "1_uzdavinys_faktoriai"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(purrr)
+library(car)
+library(lmtest)
+library(broom)
+library(zoo)
+library(ggplot2)
+data <- read.csv("duomenys.csv", TRUE, ",")
+```
+
+```{r}
+stulpeliai_pildymui <- c(
+  "Gyventoju_tankis",
+  "Gyventoju_amziaus_mediana",
+  "Moterys_1000_vyru",
+  "Apyvarta",
+  "pareigunai",
+  "Skurdo_rizika",
+  "Bedarbiai",
+  "Remtini_asmenys",
+  "Nesimokantys_vaikai",
+  "Imigrantai"
+)
+
+data <- data %>%
+  arrange(Savivaldybė, Metai) %>%
+  group_by(Savivaldybė) %>%
+  mutate(across(
+    all_of(stulpeliai_pildymui),
+    ~ zoo::na.approx(., x = Metai, na.rm = FALSE, rule = 2)
+  )) %>%
+  ungroup()
+```
+
+```{r}
+target <- "Nusikaltimų.skaičius.100.tūkst..gyventojų"
+group_var <- "Savivaldybė"
+
+faktoriai <- c(
+  "Gyventoju_tankis",
+  "Gyventoju_amziaus_mediana",
+  "Moterys_1000_vyru",
+  "Apyvarta",
+  "pareigunai",
+  "Skurdo_rizika",
+  "Bedarbiai",
+  "Remtini_asmenys",
+  "Nesimokantys_vaikai",
+  "Imigrantai"
+)
+
+data <- data %>%
+  mutate(across(all_of(c(target, faktoriai)), as.numeric))
+
+poros <- combn(faktoriai, 2, simplify = FALSE)
+
+ivertinti_modeli <- function(df, formule, target, modelio_tipas, var1, var2 = NA_character_, min_n = 22) {
+  
+  visi_kintamieji <- all.vars(formule)
+  
+  tmp <- df %>%
+    select(all_of(visi_kintamieji)) %>%
+    na.omit()
+  
+  n <- nrow(tmp)
+  
+  tuscias <- function() {
+    data.frame(
+      modelio_tipas = modelio_tipas,
+      formule = paste(deparse(formule), collapse = " "),
+      var1 = var1,
+      var2 = var2,
+      n = n,
+      adj_r2 = NA_real_,
+      aic = NA_real_,
+      p_var1 = NA_real_,
+      p_var2 = NA_real_,
+      p_saveika = NA_real_,
+      var1_reiksmingas = NA,
+      var2_reiksmingas = NA,
+      abi_reiksmingos = NA,
+      saveika_reiksminga = NA,
+      vif = NA_real_,
+      vif_ok = NA,
+      atrankai_tinka = NA
+    )
+  }
+  
+  if (n < min_n) {
+    return(tuscias())
+  }
+  
+  model <- tryCatch(
+    lm(formule, data = tmp),
+    error = function(e) NULL
+  )
+  
+  if (is.null(model)) {
+    return(tuscias())
+  }
+  
+  summ <- summary(model)
+  coef_tab <- summ$coefficients
+  
+  p_var1 <- if (var1 %in% rownames(coef_tab)) coef_tab[var1, 4] else NA_real_
+  
+  p_var2 <- if (
+    !is.na(var2) &&
+    var2 %in% rownames(coef_tab)
+  ) {
+    coef_tab[var2, 4]
+  } else {
+    NA_real_
+  }
+  
+  interakcijos_pavad1 <- if (!is.na(var2)) paste0(var1, ":", var2) else NA_character_
+  interakcijos_pavad2 <- if (!is.na(var2)) paste0(var2, ":", var1) else NA_character_
+  
+  p_saveika <- NA_real_
+  
+  if (!is.na(var2)) {
+    
+    if (interakcijos_pavad1 %in% rownames(coef_tab)) {
+      p_saveika <- coef_tab[interakcijos_pavad1, 4]
+    }
+    
+    if (interakcijos_pavad2 %in% rownames(coef_tab)) {
+      p_saveika <- coef_tab[interakcijos_pavad2, 4]
+    }
+  }
+  
+  var1_reiksmingas <- !is.na(p_var1) && p_var1 < 0.05
+  var2_reiksmingas <- !is.na(p_var2) && p_var2 < 0.05
+  
+  abi_reiksmingos <- var1_reiksmingas && var2_reiksmingas
+  
+  saveika_reiksminga <- !is.na(p_saveika) && p_saveika < 0.05
+  
+  if (modelio_tipas == "vienfaktoris") {
+    
+    vif <- NA_real_
+    vif_ok <- NA
+    
+    atrankai_tinka <- var1_reiksmingas
+  }
+  
+  if (modelio_tipas == "pora_be_sąveikos") {
+    
+    vif <- tryCatch(
+      max(car::vif(model), na.rm = TRUE),
+      error = function(e) NA_real_
+    )
+    
+    vif_ok <- !is.na(vif) && vif < 4
+    
+    atrankai_tinka <- abi_reiksmingos && vif_ok
+  }
+  
+  if (modelio_tipas == "pora_sąveika") {
+    
+    vif <- tryCatch({
+      
+      vif_vals <- suppressMessages(car::vif(model, type = "predictor"))
+      
+      if (is.matrix(vif_vals) || is.data.frame(vif_vals)) {
+        
+        if ("GVIF^(1/(2*Df))" %in% colnames(vif_vals)) {
+          
+          max(vif_vals[, "GVIF^(1/(2*Df))"], na.rm = TRUE)
+          
+        } else {
+          
+          max(vif_vals[, 1], na.rm = TRUE)
+        }
+        
+      } else {
+        
+        max(vif_vals, na.rm = TRUE)
+      }
+      
+    }, error = function(e) NA_real_)
+    
+    vif_ok <- NA
+    
+    atrankai_tinka <- saveika_reiksminga
+  }
+  
+  data.frame(
+    modelio_tipas = modelio_tipas,
+    formule = paste(deparse(formule), collapse = " "),
+    var1 = var1,
+    var2 = var2,
+    n = n,
+    adj_r2 = summ$adj.r.squared,
+    aic = AIC(model),
+    p_var1 = p_var1,
+    p_var2 = p_var2,
+    p_saveika = p_saveika,
+    var1_reiksmingas = var1_reiksmingas,
+    var2_reiksmingas = var2_reiksmingas,
+    abi_reiksmingos = abi_reiksmingos,
+    saveika_reiksminga = saveika_reiksminga,
+    vif = vif,
+    vif_ok = vif_ok,
+    atrankai_tinka = atrankai_tinka
+  )
+}
+
+ivertinti_visus_modelius <- function(df_sav, target, faktoriai, poros, min_n = 22) {
+  
+  vienfak_modeliai <- map_dfr(faktoriai, function(v) {
+    
+    formule <- as.formula(paste(target, "~", v))
+    
+    ivertinti_modeli(
+      df = df_sav,
+      formule = formule,
+      target = target,
+      modelio_tipas = "vienfaktoris",
+      var1 = v,
+      min_n = min_n
+    )
+  })
+  
+  poru_modeliai <- map_dfr(poros, function(p) {
+    
+    formule <- as.formula(paste(target, "~", p[1], "+", p[2]))
+    
+    ivertinti_modeli(
+      df = df_sav,
+      formule = formule,
+      target = target,
+      modelio_tipas = "pora_be_sąveikos",
+      var1 = p[1],
+      var2 = p[2],
+      min_n = min_n
+    )
+  })
+  
+  saveikos_modeliai <- map_dfr(poros, function(p) {
+    
+    formule <- as.formula(paste(target, "~", p[1], "*", p[2]))
+    
+    ivertinti_modeli(
+      df = df_sav,
+      formule = formule,
+      target = target,
+      modelio_tipas = "pora_sąveika",
+      var1 = p[1],
+      var2 = p[2],
+      min_n = min_n
+    )
+  })
+  
+  bind_rows(
+    vienfak_modeliai,
+    poru_modeliai,
+    saveikos_modeliai
+  )
+}
+
+isrinkti_geriausia_modeli <- function(rezultatai) {
+  
+  geri_modeliai <- rezultatai %>%
+    filter(
+      !is.na(adj_r2),
+      atrankai_tinka == TRUE
+    ) %>%
+    arrange(desc(adj_r2), aic)
+  
+  if (nrow(geri_modeliai) > 0) {
+    
+    geriausias <- geri_modeliai %>%
+      slice(1) %>%
+      mutate(
+        parinkimo_tipas = "Didžiausias adj R² tarp logiškai tinkamų modelių"
+      )
+    
+  } else {
+    
+    geriausias <- rezultatai %>%
+      filter(!is.na(adj_r2)) %>%
+      arrange(desc(adj_r2), aic) %>%
+      slice(1) %>%
+      mutate(
+        parinkimo_tipas = "Nerasta logiškai tinkamo modelio; parinktas didžiausio adj R² modelis"
+      )
+  }
+  
+  geriausias
+}
+
+ivertinti_savivaldybe <- function(df_sav, sav_pav, target, faktoriai, poros, min_n = 22) {
+  
+  rezultatai <- ivertinti_visus_modelius(
+    df_sav = df_sav,
+    target = target,
+    faktoriai = faktoriai,
+    poros = poros,
+    min_n = min_n
+  ) %>%
+    mutate(Savivaldybė = sav_pav) %>%
+    relocate(Savivaldybė)
+  
+  geriausias <- isrinkti_geriausia_modeli(rezultatai)
+  
+  list(
+    visi_modeliai = rezultatai,
+    geriausias_modelis = geriausias
+  )
+}
+
+savivaldybes <- unique(data[[group_var]])
+
+visi_rezultatai_list <- vector("list", length(savivaldybes))
+geriausi_modeliai_list <- vector("list", length(savivaldybes))
+
+for (i in seq_along(savivaldybes)) {
+  
+  sav <- savivaldybes[i]
+  
+  df_sav <- data %>%
+    filter(.data[[group_var]] == sav)
+  
+  rez <- ivertinti_savivaldybe(
+    df_sav = df_sav,
+    sav_pav = sav,
+    target = target,
+    faktoriai = faktoriai,
+    poros = poros,
+    min_n = 22
+  )
+  
+  visi_rezultatai_list[[i]] <- rez$visi_modeliai
+  geriausi_modeliai_list[[i]] <- rez$geriausias_modelis
+}
+
+visi_modeliai <- bind_rows(visi_rezultatai_list)
+
+geriausi_modeliai <- bind_rows(geriausi_modeliai_list)
+
+gauti_betas <- function(df_sav, formule_tekstu, sav_pav) {
+  
+  formule <- as.formula(formule_tekstu)
+  visi_kintamieji <- all.vars(formule)
+  
+  tmp <- df_sav %>%
+    select(all_of(visi_kintamieji)) %>%
+    na.omit()
+  
+  model <- lm(formule, data = tmp)
+  
+  broom::tidy(model) %>%
+    filter(term != "(Intercept)") %>%
+    mutate(
+      Savivaldybė = sav_pav,
+      beta = estimate,
+      p_reiksme = p.value,
+      reiksmingas = p.value < 0.05
+    ) %>%
+    select(
+      Savivaldybė,
+      term,
+      beta,
+      std.error,
+      statistic,
+      p_reiksme,
+      reiksmingas
+    )
+}
+
+geriausiu_modeliu_betos <- map_dfr(seq_len(nrow(geriausi_modeliai)), function(i) {
+  
+  sav <- geriausi_modeliai$Savivaldybė[i]
+  formule_tekstu <- geriausi_modeliai$formule[i]
+  
+  df_sav <- data %>%
+    filter(.data[[group_var]] == sav)
+  
+  gauti_betas(
+    df_sav = df_sav,
+    formule_tekstu = formule_tekstu,
+    sav_pav = sav
+  )
+})
+```
+
+```{r}
+print(geriausi_modeliai)
+
+geriausiu_modeliu_betos
+```
+
+```{r, fig.width=12, fig.height=8}
+tikrinti_prielaidas <- function(df, sav, formule, target, group_var = "Savivaldybė",
+                                braizyti = FALSE,
+                                aplankas = "prielaidu_grafikai") {
+  
+  form <- as.formula(formule)
+  visi_kintamieji <- all.vars(form)
+  
+  df_sav <- df %>%
+    filter(.data[[group_var]] == sav) %>%
+    select(all_of(c("Metai", visi_kintamieji))) %>%
+    na.omit() %>%
+    arrange(Metai)
+  
+  n <- nrow(df_sav)
+  
+  tuscias <- function() {
+    data.frame(
+      Savivaldybė = sav,
+      formule = formule,
+      n = n,
+      shapiro_p = NA_real_,
+      bp_p = NA_real_,
+      dw_p = NA_real_,
+      normalumas_ok = NA,
+      homosked_ok = NA,
+      nepriklausomumas_ok = NA,
+      visos_prielaidos_ok = NA,
+      grafiko_failas = NA_character_
+    )
+  }
+  
+  if (n < 3) return(tuscias())
+  
+  model <- tryCatch(
+    lm(form, data = df_sav),
+    error = function(e) NULL
+  )
+  
+  if (is.null(model)) return(tuscias())
+  
+  res <- residuals(model)
+  
+  shapiro_p <- tryCatch({
+    if (length(res) >= 3 && length(res) <= 5000) shapiro.test(res)$p.value else NA_real_
+  }, error = function(e) NA_real_)
+  
+  bp_p <- tryCatch(lmtest::bptest(model)$p.value, error = function(e) NA_real_)
+  dw_p <- tryCatch(lmtest::dwtest(model)$p.value, error = function(e) NA_real_)
+  
+  normalumas_ok <- !is.na(shapiro_p) && shapiro_p > 0.05
+  homosked_ok <- !is.na(bp_p) && bp_p > 0.05
+  nepriklausomumas_ok <- !is.na(dw_p) && dw_p > 0.05
+  visos_prielaidos_ok <- normalumas_ok && homosked_ok && nepriklausomumas_ok
+  
+  grafiko_failas <- NA_character_
+  
+  if (braizyti == TRUE) {
+    
+    if (!dir.exists(aplankas)) dir.create(aplankas, recursive = TRUE)
+    
+    failo_sav <- iconv(sav, from = "UTF-8", to = "ASCII//TRANSLIT")
+    failo_sav <- gsub("[^A-Za-z0-9_]+", "_", failo_sav)
+    
+    grafiko_failas <- file.path(aplankas, paste0(failo_sav, "_prielaidos.png"))
+    
+    png(
+      filename = grafiko_failas,
+      width = 3000,
+      height = 2200,
+      res = 220
+    )
+    
+    old_par <- par(no.readonly = TRUE)
+    on.exit({
+      par(old_par)
+      dev.off()
+    }, add = TRUE)
+    
+    layout(
+      matrix(c(
+        1, 2,
+        3, 4,
+        5, 6
+      ), nrow = 3, byrow = TRUE),
+      heights = c(1, 1, 1)
+    )
+    
+    par(
+      mar = c(4.5, 4.5, 3.8, 1.5),
+      oma = c(0, 0, 5, 0),
+      cex.main = 1,
+      cex.lab = 0.95,
+      cex.axis = 0.9
+    )
+    
+    hist(
+      res,
+      breaks = 10,
+      probability = TRUE,
+      col = "skyblue",
+      border = "black",
+      main = "Liekanų histograma",
+      xlab = "Liekanos",
+      ylab = "Tankis"
+    )
+    
+    if (sd(res, na.rm = TRUE) > 0) {
+      curve(
+        dnorm(x, mean = mean(res, na.rm = TRUE), sd = sd(res, na.rm = TRUE)),
+        add = TRUE,
+        col = "red",
+        lwd = 2
+      )
+    }
+    
+    acf(
+      res,
+      main = "ACF grafikas",
+      xlab = "Vėlavimas",
+      ylab = "Autokoreliacija"
+    )
+    
+    plot(
+      model,
+      which = 1,
+      main = "Residuals vs Fitted",
+      caption = "",
+      sub.caption = ""
+    )
+
+    plot(
+      model,
+      which = 2,
+      main = "Normal Q-Q",
+      caption = "",
+      sub.caption = ""
+    )
+
+    plot(
+      model,
+      which = 3,
+      main = "Scale-Location",
+      caption = "",
+      sub.caption = ""
+    )
+
+    plot(
+      model,
+      which = 5,
+      main = "Residuals vs Leverage",
+      caption = "",
+      sub.caption = ""
+    )
+    
+    mtext(
+      paste("Grafikų panelė –", sav),
+      side = 3,
+      outer = TRUE,
+      line = 1,
+      cex = 1.4,
+      font = 2
+    )
+  }
+  
+  data.frame(
+    Savivaldybė = sav,
+    formule = formule,
+    n = n,
+    shapiro_p = shapiro_p,
+    bp_p = bp_p,
+    dw_p = dw_p,
+    normalumas_ok = normalumas_ok,
+    homosked_ok = homosked_ok,
+    nepriklausomumas_ok = nepriklausomumas_ok,
+    visos_prielaidos_ok = visos_prielaidos_ok,
+    grafiko_failas = grafiko_failas
+  )
+}
+```
+
+```{r}
+prielaidu_rezultatai <- purrr::pmap_dfr(
+  geriausi_modeliai,
+  function(Savivaldybė, formule, ...) {
+    tikrinti_prielaidas(
+      df = data,
+      sav = Savivaldybė,
+      formule = formule,
+      target = target,
+      group_var = group_var,
+      braizyti = TRUE,
+      aplankas = "prielaidu_grafikai"
+    )
+  }
+)
+```

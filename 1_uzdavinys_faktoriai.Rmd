@@ -166,7 +166,7 @@ ivertinti_modeli <- function(df, formule, target, modelio_tipas, var1, var2 = NA
     
     vif <- tryCatch({
       
-      vif_vals <- suppressMessages(car::vif(model, type = "predictor"))
+      vif_vals <- suppressMessages(car::vif(model, type = "terms"))
       
       if (is.matrix(vif_vals) || is.data.frame(vif_vals)) {
         
